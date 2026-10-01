@@ -1056,7 +1056,7 @@ th{
       <div class="field"><label for="password">Senha</label><input id="password" type="password" autocomplete="current-password" required></div>
       <button class="btn primary" style="width:100%" type="submit">Entrar</button>
     </form>
-    <button id="signup" class="btn" style="width:100%;margin-top:9px">Criar conta administrativa</button>
+    <button id="signup" class="btn" style="width:100%;margin-top:9px">Criar conta</button>
     <div id="loginMsg"></div>
   </div>
 </div>
@@ -1623,6 +1623,60 @@ th{
 
 </div>
 
+
+<!-- =====================================================
+     MODAL CRIAR CONTA
+     ===================================================== -->
+<div id="signupModal" class="modal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <h2>Criar conta</h2>
+      <button class="close" data-close="signupModal">×</button>
+    </div>
+
+    <form id="signupForm">
+      <div class="form-grid">
+        <div class="field full">
+          <label for="signupEmail">E-mail</label>
+          <input id="signupEmail" type="email" autocomplete="email" required>
+        </div>
+
+        <div class="field">
+          <label for="signupPassword">Senha</label>
+          <input id="signupPassword" type="password" autocomplete="new-password" minlength="6" required>
+        </div>
+
+        <div class="field">
+          <label for="signupPasswordConfirm">Confirmar senha</label>
+          <input id="signupPasswordConfirm" type="password" autocomplete="new-password" minlength="6" required>
+        </div>
+
+        <div class="field">
+          <label for="signupRole">Tipo de conta</label>
+          <select id="signupRole" required>
+            <option value="student">Aluno</option>
+            <option value="responsible">Responsável</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="signupStudent">Aluno / responsável pela conta</label>
+          <select id="signupStudent" required>
+            <option value="">Carregando alunos...</option>
+          </select>
+          <div class="course-help">Selecione o aluno que ficará vinculado a esta conta.</div>
+        </div>
+      </div>
+
+      <div id="signupMsg" style="min-height:20px;color:var(--yellow);font-size:13px;margin-top:10px"></div>
+
+      <div class="modal-actions">
+        <button type="button" class="btn" data-close="signupModal">Cancelar</button>
+        <button class="btn primary" type="submit" id="signupSubmit">Criar conta</button>
+      </div>
+    </form>
+  </div>
+</div>
 
 <!-- =====================================================
      MODAL PAGAMENTO — RESPONSÁVEL
@@ -6982,6 +7036,7 @@ $('loginForm').onsubmit=
         password:$('password').value
       });
       if(error)throw error;
+      await ensureProfileFromMetadata();
       const profile=await getProfile();
       currentRole=profile.role||'admin';
       if(currentRole==='admin'){
@@ -7022,49 +7077,146 @@ $('loginForm').onsubmit=
    CADASTRO
    ========================================================= */
 
-$('signup').onclick=
-  async()=>{
+async function loadSignupStudents(){
+  const select=$('signupStudent');
+  if(!select)return;
 
-    const email=
-      $('email')
-        .value
-        .trim();
+  select.innerHTML='<option value="">Carregando alunos...</option>';
 
-    const password=
-      $('password')
-        .value;
+  const {data,error}=await client
+    .from('students')
+    .select('id,name')
+    .order('name');
 
+  if(error){
+    console.error('Erro ao carregar alunos para cadastro:',error);
+    select.innerHTML='<option value="">Não foi possível carregar os alunos</option>';
+    $('signupMsg').textContent='Não foi possível carregar a lista de alunos. Verifique as permissões da tabela students.';
+    return false;
+  }
 
-    if(
-      !email ||
-      password.length<6
-    ){
+  if(!data?.length){
+    select.innerHTML='<option value="">Nenhum aluno cadastrado</option>';
+    return false;
+  }
 
-      $('loginMsg').textContent=
-        'Informe um e-mail e senha com pelo menos 6 caracteres.';
+  select.innerHTML='<option value="">Selecione o aluno</option>'+data.map(st=>`<option value="${esc(st.id)}">${esc(st.name||'Aluno sem nome')}</option>`).join('');
+  return true;
+}
 
-      return;
+async function ensureProfileFromMetadata(){
+  const u=await user();
+  const meta=u?.user_metadata||{};
+  const role=String(meta.account_type||'').toLowerCase();
+  const studentId=meta.student_id||null;
 
-    }
+  if(!u || !studentId || !['student','responsible'].includes(role))return;
 
+  const {data:existing,error:readError}=await client
+    .from('portal_profiles')
+    .select('id,role,student_id,owner_id')
+    .eq('id',u.id)
+    .maybeSingle();
 
-    const {
-      error
-    }=await client.auth.signUp({
+  if(readError && readError.code!=='PGRST116')throw readError;
+  if(existing)return existing;
 
+  const {data:created,error:createError}=await client
+    .from('portal_profiles')
+    .insert({
+      id:u.id,
+      owner_id:u.id,
+      role,
+      student_id:studentId
+    })
+    .select('id,role,student_id,owner_id')
+    .single();
+
+  if(createError)throw createError;
+  return created;
+}
+
+$('signup').onclick=async()=>{
+  $('signupMsg').textContent='';
+  $('signupEmail').value=$('email').value.trim();
+  $('signupPassword').value='';
+  $('signupPasswordConfirm').value='';
+  $('signupRole').value='student';
+  const loaded=await loadSignupStudents();
+  if(!loaded && $('signupStudent').options.length<=1){
+    // O modal continua aberto para que o problema fique visível ao usuário.
+  }
+  $('signupModal').classList.add('open');
+};
+
+$('signupRole').addEventListener('change',()=>{
+  $('signupMsg').textContent='';
+});
+
+$('signupForm').onsubmit=async e=>{
+  e.preventDefault();
+
+  const email=$('signupEmail').value.trim();
+  const password=$('signupPassword').value;
+  const confirm=$('signupPasswordConfirm').value;
+  const role=$('signupRole').value;
+  const studentId=$('signupStudent').value;
+  const btn=$('signupSubmit');
+
+  if(!email || password.length<6){
+    $('signupMsg').textContent='Informe um e-mail e uma senha com pelo menos 6 caracteres.';
+    return;
+  }
+
+  if(password!==confirm){
+    $('signupMsg').textContent='As senhas não coincidem.';
+    return;
+  }
+
+  if(!studentId){
+    $('signupMsg').textContent='Selecione o aluno que ficará vinculado à conta.';
+    return;
+  }
+
+  btn.disabled=true;
+  btn.textContent='Criando...';
+  $('signupMsg').textContent='';
+
+  try{
+    const {data,error}=await client.auth.signUp({
       email,
-      password
-
+      password,
+      options:{
+        data:{
+          account_type:role,
+          student_id:studentId
+        }
+      }
     });
 
+    if(error)throw error;
 
-    $('loginMsg').textContent=
-      error
-      ? error.message
-      :
-      'Conta criada. Se o Supabase pedir confirmação, confirme seu e-mail e depois entre.';
+    // Quando a confirmação por e-mail está desativada, a sessão já existe
+    // e a associação pode ser criada imediatamente.
+    if(data?.session && data?.user){
+      await ensureProfileFromMetadata();
+      await client.auth.signOut();
+      $('signupModal').classList.remove('open');
+      $('loginMsg').textContent='Conta criada e vinculada ao aluno. Faça login para entrar.';
+      return;
+    }
 
-  };
+    // Quando o projeto exige confirmação de e-mail, os dados ficam nos
+    // metadados da conta e a associação é criada automaticamente no primeiro login.
+    $('signupMsg').textContent='Conta criada. Confirme o e-mail, se solicitado, e depois entre com a conta criada.';
+  }catch(err){
+    console.error('Erro ao criar conta:',err);
+    $('signupMsg').textContent=err?.message||'Não foi possível criar a conta.';
+  }finally{
+    btn.disabled=false;
+    btn.textContent='Criar conta';
+  }
+};
 
 
 /* =========================================================
